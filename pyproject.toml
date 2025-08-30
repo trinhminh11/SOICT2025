@@ -1,0 +1,18 @@
+[project]
+name = "soict2025"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "gymnasium>=1.2.0",
+    "munkres>=1.1.4",
+    "torch>=2.8.0",
+    "torch-geometric>=2.4.0",
+    "networkx>=3.0",
+    "numpy>=1.24.0",
+    "scipy>=1.16.1",
+    "pygame>=2.6.1",
+    "stable-baselines3>=2.7.0",
+    "torchinfo>=1.8.0",
+]
