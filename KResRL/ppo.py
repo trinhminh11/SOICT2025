@@ -24,8 +24,8 @@ from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.type_aliases import Schedule
 
-from KResRL.environment import KRes
-from KResRL.GNNbase import BlockBase, GATBlock, GCNAdjBlock, GCNBlock, ResBn
+from .environment import KRes
+from .GNNbase import BlockBase, GATBlock, GCNAdjBlock, GCNBlock, ResBn
 
 
 class RewardCallback(BaseCallback):

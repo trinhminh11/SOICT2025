@@ -8,7 +8,7 @@ from torch_geometric.nn.resolver import (
     activation_resolver,
     normalization_resolver,
 )
-from KResRL.utils import to_batch
+from .utils import to_batch
 
 class GCNConvAdj(torch.nn.Module):
     """GCN layer taking adjacency matrix instead of edge_index."""
