@@ -4,7 +4,8 @@ from gymnasium import spaces
 import numpy as np
 import networkx as nx
 from munkres import Munkres
-from environment.view import GridView
+
+from KResRL.environment.view import GridView
 
 
 class KRes(gym.Env):

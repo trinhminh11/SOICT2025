@@ -1,17 +1,14 @@
-from typing import Callable, Optional, Any
+from typing import Any, Callable, Optional
+
 import torch
-from torch_geometric.nn import GCNConv, GATConv, GATv2Conv
-
-
+from torch_geometric.nn import GATConv, GATv2Conv, GCNConv
+from torch_geometric.nn.dense.linear import Linear as GraphLinear
+from torch_geometric.nn.inits import zeros
 from torch_geometric.nn.resolver import (
     activation_resolver,
     normalization_resolver,
 )
-
-from utils import to_batch
-
-from torch_geometric.nn.inits import zeros
-from torch_geometric.nn.dense.linear import Linear as GraphLinear
+from KResRL.utils import to_batch
 
 class GCNConvAdj(torch.nn.Module):
     """GCN layer taking adjacency matrix instead of edge_index."""
