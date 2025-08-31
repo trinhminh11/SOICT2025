@@ -44,13 +44,14 @@ class KRes(gym.Env):
         "render_fps": 60,
     }
 
-    def __init__(self, n_drones: int, k: int, size: int, return_state: Literal["grid", "pos", "features"] = "features", normalize_features: bool = True, alpha = 0.1, render_mode: Literal["human", "rgb_array"] = None, render_fps: int = 60) -> None:
+    def __init__(self, n_drones: int, k: int, size: int, return_adj: bool = True, return_state: Literal["grid", "pos", "features"] = "features", normalize_features: bool = True, alpha = 0.1, render_mode: Literal["human", "rgb_array"] = None, render_fps: int = 60) -> None:
         super().__init__()
         self.n_drones = n_drones
         self.k = k
         self.size = size
         self.max_movement = size  # max movement of 1 drone in grid steps
         
+        self.return_adj = return_adj
         self.return_state = return_state
         self.normalize_features = normalize_features
         self.alpha = alpha
@@ -76,10 +77,14 @@ class KRes(gym.Env):
             # adjacency matrix = space[:, :self.n_drones]
             # node_features = space[:, self.n_drones:self.n_drones + len(self.NODE_FEATURES)]
             # global_features = space[:, self.n_drones + len(self.NODE_FEATURES):]
+            if return_adj:
+                shape = (self.n_drones, self.n_drones + len(self.NODE_FEATURES))
+            else:
+                shape = (self.n_drones, len(self.NODE_FEATURES))
             self.observation_space = spaces.Box(
                 low=low,
                 high=high,
-                shape=(self.n_drones, self.n_drones + len(self.NODE_FEATURES)),
+                shape=shape,
             )
         else:
             raise ValueError("Invalid return_state value. Use 'grid' or 'pos'.")
@@ -150,11 +155,20 @@ class KRes(gym.Env):
         return _state
 
     def __get_features_state(self, graph_state: nx.Graph, node_features: dict[str, np.ndarray]):
-        _features = np.zeros((self.n_drones, self.n_drones + len(self.NODE_FEATURES) + len(self.GLOBAL_FEATURES)), dtype=np.float32)
+        if self.return_adj:
+            shape = (self.n_drones, self.n_drones + len(self.NODE_FEATURES))
+            s = self.n_drones
+            adj = nx.adjacency_matrix(graph_state).todense().astype(np.float32)
+        else:
+            shape = (self.n_drones, len(self.NODE_FEATURES))
+            s = 0
+            adj = []
 
-        _features[:, :self.n_drones] = nx.adjacency_matrix(graph_state).todense().astype(np.float32)
+        _features = np.zeros(shape, dtype=np.float32)
 
-        _features[:, self.n_drones:] = np.array([node_features[feature] / self.normalize_node[feature] for feature in self.NODE_FEATURES], dtype=np.float32).T
+        _features[:, :s] = adj
+
+        _features[:, s:] = np.array([node_features[feature] / self.normalize_node[feature] for feature in self.NODE_FEATURES], dtype=np.float32).T
 
         return _features
 
