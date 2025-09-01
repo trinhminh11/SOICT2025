@@ -1,13 +1,12 @@
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional
 
 import torch
 import torch.nn as nn
 from gymnasium import spaces
-from stable_baselines3.common.type_aliases import Schedule
 
-from .ac_policy import NodeLevelActorCriticPolicy, PolicyOptions, NodeLevelFeatureExtractor
-from .GNNbase import BlockBase, GATBlock, GCNAdjBlock, GCNBlock, ResBn
+from .ac_policy import NodeLevelFeatureExtractor, PolicyOptions
+from .graph_base import GATBlock, GCNAdjBlock, GCNBlock, GraphBase, ResBn
 
 
 class GraphFeaturesExtractor(NodeLevelFeatureExtractor):
@@ -19,12 +18,12 @@ class GraphFeaturesExtractor(NodeLevelFeatureExtractor):
     - obs[:, :, n_drones:] contains node features
     """
 
-    supported: list[BlockBase] = [GCNBlock, GCNAdjBlock, GATBlock]
+    supported: list[GraphBase] = [GCNBlock, GCNAdjBlock, GATBlock]
 
     def __init__(
         self,
         observation_space: spaces.Box,
-        NNBlock: BlockBase = GCNBlock,
+        NNBlock: GraphBase = GCNBlock,
         hidden_dims: list[int] = [64, 64],
         used_res: list[bool] | bool = [True, False],
         norm: Optional[str | Callable] = "layer",
@@ -108,74 +107,11 @@ class GraphFeaturesExtractor(NodeLevelFeatureExtractor):
         return X  # batch_size, n_drones, hidden_dims[-1]
 
 
-class GraphlActorCriticPolicy(NodeLevelActorCriticPolicy):
-    def __init__(
-        self,
-        observation_space: spaces.Space,
-        action_space: spaces.Space,
-        lr_schedule: Schedule,
-        NNBlock: BlockBase,
-        hidden_dims: list[int] = [64, 64],
-        used_res: list[bool] | bool = True,
-        norm: Optional[str | Callable] = "layer",
-        norm_kwargs: Optional[dict[str, Any]] = None,
-        act: Optional[str | Callable] = "relu",
-        act_kwargs: Optional[dict[str, Any]] = None,
-        gnn_layer_kwargs: dict[str, Any] = None,
-        dropout: float = 0.1,
-        net_arch: Optional[Union[list[int], dict[str, list[int]]]] = None,
-        activation_fn: type[torch.nn.Module] = torch.nn.Tanh,
-        ortho_init: bool = True,
-        use_sde: bool = False,
-        log_std_init: float = 0.0,
-        full_std: bool = True,
-        use_expln: bool = False,
-        squash_output: bool = False,
-        share_features_extractor: bool = True,
-        normalize_images: bool = True,
-        optimizer_class: type[torch.optim.Optimizer] = torch.optim.Adam,
-        optimizer_kwargs: Optional[dict[str, Any]] = None,
-    ):
-        self.n_nodes = observation_space.shape[0]
-
-        super().__init__(
-            observation_space=observation_space,
-            action_space=action_space,
-            lr_schedule=lr_schedule,
-            net_arch=net_arch,
-            activation_fn=activation_fn,
-            ortho_init=ortho_init,
-            use_sde=use_sde,
-            log_std_init=log_std_init,
-            full_std=full_std,
-            use_expln=use_expln,
-            squash_output=squash_output,
-            features_extractor_class=GraphFeaturesExtractor,
-            features_extractor_kwargs=dict(
-                NNBlock=NNBlock,
-                used_res=used_res,
-                hidden_dims=hidden_dims,
-                norm=norm,
-                norm_kwargs=norm_kwargs,
-                act=act,
-                act_kwargs=act_kwargs,
-                gnn_layer_kwargs=gnn_layer_kwargs,
-                dropout=dropout,
-            ),
-            share_features_extractor=share_features_extractor,
-            normalize_images=normalize_images,
-            optimizer_class=optimizer_class,
-            optimizer_kwargs=optimizer_kwargs,
-        )
-
-
 @dataclass(frozen=True)
-class GraphPolicyOptions(PolicyOptions):
-    policy_cls: type[GraphlActorCriticPolicy] = field(default=GraphlActorCriticPolicy, init=False)
-    NNBlock: BlockBase = GCNBlock
+class GraphFeatureOptions:
+    NNBlock: type[GraphBase] = GCNBlock
     hidden_dims: list[int] = field(default_factory=lambda: [64, 64])
     used_res: bool | list[bool] = True
-
     norm: str = "layer"
     norm_kwargs: Optional[dict[str, Any]] = None
     act: str = "relu"
@@ -183,3 +119,10 @@ class GraphPolicyOptions(PolicyOptions):
     gnn_layer_kwargs: Optional[dict] = None
     dropout: float = 0.5
 
+
+@dataclass(frozen=True)
+class GraphPolicyOptions(PolicyOptions):
+    features_extractor_class: type[GraphFeaturesExtractor] = field(
+        default=GraphFeaturesExtractor, init=False
+    )
+    features_extractor_kwargs: GraphFeatureOptions = GraphFeatureOptions()

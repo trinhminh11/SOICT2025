@@ -1,37 +1,72 @@
 from KResRL.ppo import EnvOptions, RLOptions, TrainOptions, train
-from KResRL.policy import GraphPolicyOptions, GCNBlock
+from KResRL.policy.graph_policy import GraphPolicyOptions, GCNBlock, GraphFeatureOptions
+from KResRL.policy.att_policy import SAB, ISAB, AttFeatureOptions, AttPolicyOptions
+
+from KResRL.environment.env import KRes
 
 def main():
     env_options = EnvOptions(
         n_envs=1,
         n_drones=20,
         k = 3,
-        size=10,
+        size=30,
+        alpha=0.001
     )
 
+    # features_extractor_options = GraphFeatureOptions(
+    #     NNBlock=GCNBlock,
+    #     hidden_dims=[128, 256, 128, 64],
+    #     used_res=[False, True, True, False],
+    #     norm="layer",
+    #     act="relu",
+    #     act_kwargs={"inplace": True},
+    #     dropout=0.1,
+    #     gnn_layer_kwargs={}  # Add GAT-specific params if using GATBlock
+    # )
 
-    policy_options = GraphPolicyOptions(
-        NNBlock=GCNBlock,
-        hidden_dims=[128, 256, 128, 64],
-        used_res=[False, True, True, False],
-        norm="layer",
-        act="relu",
-        act_kwargs={"inplace": True},
-        dropout=0.1,
+    features_extractor_options = AttFeatureOptions(
+        NNBlock=SAB,
+        n_layers=6
+    )
+
+    policy_options = AttPolicyOptions(
+        features_extractor_kwargs=features_extractor_options,
         net_arch={"pi": [256, 128], "vf": [256, 128]},
-        gnn_layer_kwargs={}  # Add GAT-specific params if using GATBlock
     )
 
     rl_options = RLOptions(
         gamma=0.99,
+        n_steps=256
     )
 
     train_options = TrainOptions(
-        total_timesteps=1_000_000,
+        total_timesteps=10_000,
         log_interval=100
     )
 
-    train(env_options, policy_options, rl_options, train_options)
+    model = train(env_options, policy_options, rl_options, train_options)
+
+    model.save("trained_model")
+
+    env = KRes(
+        n_drones=20,
+        k=3,
+        size=30,
+        return_state="features",
+        normalize_features=True,
+        render_mode="human",
+        render_fps=1,
+    )
+
+    obs, _ = env.reset()
+
+    for i in range(256):
+        env.render()
+        actions, _ = model.predict(obs)
+        new_obs, reward, done, terminated, info = env.step(actions)
+
+        if done:
+            break
 
 if __name__ == "__main__":
     main()

@@ -1,10 +1,10 @@
-from functools import partial
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Optional, Union
 
-from gymnasium import spaces
 import numpy as np
 import torch
+from gymnasium import spaces
 from stable_baselines3.common.distributions import (
     BernoulliDistribution,
     CategoricalDistribution,
@@ -13,15 +13,15 @@ from stable_baselines3.common.distributions import (
     StateDependentNoiseDistribution,
 )
 from stable_baselines3.common.policies import ActorCriticPolicy
-from stable_baselines3.common.type_aliases import Schedule
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+from stable_baselines3.common.type_aliases import Schedule
+
 
 @dataclass(frozen=True)
 class PolicyOptions:
     """
     General Policy options for the actor-critic model
     """
-    policy_cls: type[ActorCriticPolicy]
 
     net_arch: Optional[Union[list[int], dict[str, list[int]]]] = None
     activation_fn: type[torch.nn.Module] = torch.nn.Tanh
@@ -34,6 +34,7 @@ class PolicyOptions:
     normalize_images: bool = True
     optimizer_class: type[torch.optim.Optimizer] = torch.optim.Adam
     optimizer_kwargs: Optional[dict[str, Any]] = None
+
 
 class ValueNet(torch.nn.Module):
     def __init__(self, n_nodes: int, latent_dim: int):
@@ -66,7 +67,9 @@ class NodeLevelFeatureExtractor(BaseFeaturesExtractor):
     Args:
         BaseFeaturesExtractor (_type_): _description_
     """
+
     pass
+
 
 class NodeLevelActorCriticPolicy(ActorCriticPolicy):
     def __init__(
@@ -82,8 +85,10 @@ class NodeLevelActorCriticPolicy(ActorCriticPolicy):
         full_std: bool = True,
         use_expln: bool = False,
         squash_output: bool = False,
-        features_extractor_class: type[NodeLevelFeatureExtractor] = NodeLevelFeatureExtractor,
-        features_extractor_kwargs: dict[str, Any]=None,
+        features_extractor_class: type[
+            NodeLevelFeatureExtractor
+        ] = NodeLevelFeatureExtractor,
+        features_extractor_kwargs: dict[str, Any] = None,
         share_features_extractor: bool = True,
         normalize_images: bool = True,
         optimizer_class: type[torch.optim.Optimizer] = torch.optim.Adam,
@@ -92,7 +97,9 @@ class NodeLevelActorCriticPolicy(ActorCriticPolicy):
         self.n_nodes = observation_space.shape[0]
 
         if not issubclass(features_extractor_class, NodeLevelFeatureExtractor):
-            raise ValueError("features_extractor_class must be a subclass of NodeLevelFeatureExtractor")
+            raise ValueError(
+                "features_extractor_class must be a subclass of NodeLevelFeatureExtractor"
+            )
 
         super().__init__(
             observation_space=observation_space,
@@ -113,7 +120,7 @@ class NodeLevelActorCriticPolicy(ActorCriticPolicy):
             optimizer_class=optimizer_class,
             optimizer_kwargs=optimizer_kwargs,
         )
-    
+
     def get_features_extractor_class(self) -> type[torch.nn.Module]:
         raise NotImplementedError("")
 
@@ -211,4 +218,3 @@ class NodeLevelActorCriticPolicy(ActorCriticPolicy):
         log_prob = distribution.log_prob(actions)
         actions = actions.reshape((-1, *self.action_space.shape))  # type: ignore[misc]
         return actions, values, log_prob
-

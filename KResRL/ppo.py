@@ -2,24 +2,28 @@ import os
 import sys
 from dataclasses import asdict, dataclass
 
+import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
 
-from .policy.ac_policy import PolicyOptions
-from .environment import KRes
+from KResRL.policy.ac_policy import PolicyOptions, NodeLevelActorCriticPolicy
+from KResRL.environment.env import KRes
 
 
 class RewardCallback(BaseCallback):
     def __init__(self, verbose=1):
         super().__init__(verbose)
-        self.max_reward = -float("inf")
+
+        self.rewards = np.zeros((100, ), dtype=np.float32)
 
     def _on_step(self) -> bool:
         for reward in self.locals.get("rewards", []):
-            self.max_reward = max(self.max_reward, reward)
+            self.rewards = np.roll(self.rewards, -1)
+            self.rewards[-1] = reward
+
             print(
-                f"Step: {self.num_timesteps} Reward: {reward:>20} Max Reward: {self.max_reward}"
+                f"Step: {self.num_timesteps:<10} Reward: {reward:>8.2f} Max Reward: {self.rewards.max():>8.2f} Mean Reward: {self.rewards.mean():>8.2f} Min Reward: {self.rewards.min():>8.2f}",
             )
         return True
 
@@ -78,7 +82,7 @@ def train(
 
     # Create PPO model with custom GCN policy
     model = PPO(
-        policy=policy_options.policy_cls,
+        policy=NodeLevelActorCriticPolicy,
         env=env,
         policy_kwargs=policy_kwargs,
         **asdict(rl_options),

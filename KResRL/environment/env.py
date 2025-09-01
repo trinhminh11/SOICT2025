@@ -22,11 +22,15 @@ class KRes(gym.Env):
     }
 
     NODE_FEATURES = [
+        "first_center_row",     # normalize (0, 1)  first_center_row/n_cols
+        "first_center_col",     # normalize (0, 1)  first_center_col/n_rows
         "row",                  # normalize (0, 1)  row/n_cols
         "col",                  # normalize (0, 1)  col/n_rows
-        "step_size",            #           (0, 1)  1 / size
-        "total_movement",       # normalize (0, 1)  total_movement/ size
-        "degree",               # normalize (0, 1)  degree/ K
+        # "center_row",           # normalize (0, 1)  center_row/n_cols
+        # "center_col",           # normalize (0, 1)  center_col/n_rows
+        # "step_size",            #           (0, 1)  1 / size
+        # "total_movement",       # normalize (0, 1)  total_movement/ size
+        # "degree",               # normalize (0, 1)  degree/ K
         "node_connectivity",    # normalize (0, 1)  node_connectivity/K
     ]
 
@@ -92,8 +96,12 @@ class KRes(gym.Env):
         self.action_space = spaces.MultiDiscrete([9]*self.n_drones)  # 9 actions for each drone (stay, up, UR, right, RD, down, DL, left, LU)
 
         self.node_features = {
+            "first_center_row": np.zeros((self.n_drones,), dtype=np.float32),
+            "first_center_col": np.zeros((self.n_drones,), dtype=np.float32),
             "row": np.zeros((self.n_drones,), dtype=np.uint16),
             "col": np.zeros((self.n_drones,), dtype=np.uint16),
+            "center_row": np.zeros((self.n_drones,), dtype=np.float32),
+            "center_col": np.zeros((self.n_drones,), dtype=np.float32),
             "step_size": np.full((self.n_drones,), 1/(self.size-1), dtype=np.float32),
             "total_movement": np.zeros((self.n_drones,), dtype=np.uint16),
             "node_connectivity": np.zeros((self.n_drones,), dtype=np.uint16),
@@ -101,8 +109,12 @@ class KRes(gym.Env):
         }
 
         self.normalize_node: dict[str, float] = {
+            "first_center_row": self.size - 1 if self.normalize_features else 1,
+            "first_center_col": self.size - 1 if self.normalize_features else 1,    
             "row": self.size - 1 if self.normalize_features else 1,
             "col": self.size - 1 if self.normalize_features else 1,
+            "center_row": self.size - 1 if self.normalize_features else 1,
+            "center_col": self.size - 1 if self.normalize_features else 1,
             "step_size": 1,
             "total_movement": self.max_movement if self.normalize_features else 1,
             "node_connectivity": self.k if self.normalize_features else 1,
@@ -194,7 +206,8 @@ class KRes(gym.Env):
         for i, j in indexes:
             after_matching_drone_pos[i] = value[j]
 
-        self._drone_pos = after_matching_drone_pos
+        # self._drone_pos = after_matching_drone_pos
+        self._drone_pos = value
 
         self.graph_state = self.__get_graph_state(self._drone_pos)
         self.grid_state = self.__get_grid_state(self._drone_pos)
@@ -206,6 +219,10 @@ class KRes(gym.Env):
             self.node_features["total_movement"][i] = cost_matrix[i][indexes[i][1]]
             self.node_features["node_connectivity"][i] = self.get_drone_connectivity_value(i)
             self.node_features["degree"][i] = self.graph_state.degree[i]
+
+        center = self.get_grid_center()
+        self.node_features["center_row"] = np.full((self.n_drones,), center[0], dtype=np.float32)
+        self.node_features["center_col"] = np.full((self.n_drones,), center[1], dtype=np.float32)
 
         self.global_features["graph_connectivity"] = min(self.node_features["node_connectivity"])
 
@@ -280,10 +297,32 @@ class KRes(gym.Env):
 
         self.drone_pos = _drone_pos
 
+        self.last_center = self.get_grid_center()
+        self.first_center = self.last_center
+
+        # TODO: delete
+        self.last_distance_to_center = np.zeros(self.n_drones, dtype=np.float32)
+        self.last_distance_to_first_center = np.zeros(self.n_drones, dtype=np.float32)
+        for i in range(self.n_drones):
+            self.last_distance_to_center[i] = np.linalg.norm(self.drone_pos[i].astype(np.float32) - np.array(self.last_center).astype(np.float32))
+            self.last_distance_to_first_center[i] = np.linalg.norm(self.drone_pos[i].astype(np.float32) - np.array(self.first_center).astype(np.float32))
+
+        self.node_features["first_center_row"] = np.full((self.n_drones,), self.first_center[0], dtype=np.float32)
+        self.node_features["first_center_col"] = np.full((self.n_drones,), self.first_center[1], dtype=np.float32)
+        self.node_features["center_row"] = np.full((self.n_drones,), self.last_center[0], dtype=np.float32)
+        self.node_features["center_col"] = np.full((self.n_drones,), self.last_center[1], dtype=np.float32)
+
         return self.state, {}
+    
+    def get_grid_center(self):
+        grid_state = self.grid_state.sum(axis=2)
+        rows, cols = np.where(grid_state > 0)
+        mean_row = rows.mean()
+        mean_col = cols.mean()
+        return float(mean_row), float(mean_col)
 
     def step(self, action: np.ndarray):
-        team_reward = 0
+        reward = 0
         info = {
             "initial_features": self.initial_features_state,
             "initial_global_features": self.initial_global_features,
@@ -295,23 +334,63 @@ class KRes(gym.Env):
         # update node_features
         self.drone_pos = np.clip(self.drone_pos + moves, [0,0], [self.size-1, self.size-1])
 
-        current_k = min(self.node_features["node_connectivity"])
+        current_k = int(min(self.node_features["node_connectivity"]))
         info["current_k"] = current_k
         info["sparse_reward"] = np.zeros(self.n_drones, dtype=np.float32)
         info["global_features"] = self.global_features
 
         done = current_k >= self.k
 
+        team_reward = 0
+
         # Compute team reward
-        team_reward = current_k / self.k - self.alpha * sum(self.node_features["total_movement"]) + self.n_drones * 10 * done
+        # team_reward = current_k - self.k//2 - self.alpha * sum(self.node_features["total_movement"]) + self.n_drones * 10 * done
+        # center = self.get_grid_center()
+        # info["center"] = center
 
-        # Compute individual drone rewards
-        drone_reward = np.zeros(self.n_drones, dtype=np.float32)
+        # # Compute individual drone rewards
+        # drone_reward = np.zeros(self.n_drones, dtype=np.float32)
+        # for i in range(self.n_drones):
+        #     drone_reward[i] = self.node_features["node_connectivity"][i] / self.k + 10 * done
+
+        #     distance_to_center = np.linalg.norm(self.drone_pos[i].astype(np.float32) - np.array(center).astype(np.float32))
+            
+        #     distance_penalty = -distance_to_center / self.size
+
+        #     drone_reward[i] +=  distance_penalty
+        #     info["sparse_reward"][i] = drone_reward[i]
+
+        #     team_reward += distance_penalty
+
+        # reward = team_reward + np.mean(drone_reward)
+
+
+
+
+        center = self.get_grid_center()
+
+        distance_to_last_center = np.zeros(self.n_drones, dtype=np.float32)
+        distance_to_center = np.zeros(self.n_drones, dtype=np.float32)
+        distance_to_first_center = np.zeros(self.n_drones, dtype=np.float32)
+
+
         for i in range(self.n_drones):
-            drone_reward[i] = self.node_features["node_connectivity"][i] / self.k + 10 * done
-            info["sparse_reward"][i] = drone_reward[i]
+            distance_to_last_center[i] = np.linalg.norm(self.drone_pos[i].astype(np.float32) - np.array(self.last_center, dtype=np.float32))
+            distance_to_center[i] = np.linalg.norm(self.drone_pos[i].astype(np.float32) - np.array(center, dtype=np.float32))
+            distance_to_first_center[i] = np.linalg.norm(self.drone_pos[i].astype(np.float32) - np.array(self.first_center, dtype=np.float32))
 
-        reward = team_reward + np.mean(drone_reward)
+        diff_distance = self.last_distance_to_center - distance_to_last_center
+        diff_first_center_distance = self.last_distance_to_first_center - distance_to_first_center
+
+
+        reward += diff_distance.sum() + 2*diff_first_center_distance.sum()
+
+        self.last_distance_to_center = distance_to_center
+        self.last_distance_to_first_center = distance_to_first_center
+        self.last_center = center
+
+
+        reward += 100*done + 4*current_k/self.k
 
         return self.state, reward, done, False, info
 
