@@ -1,6 +1,7 @@
 import os
 import sys
 from dataclasses import asdict, dataclass
+from typing import Literal
 
 import numpy as np
 from stable_baselines3 import PPO
@@ -35,6 +36,7 @@ class EnvOptions:
     k: int
     size: int
     alpha: float = 0.1
+    return_reward: Literal["global", "sparse", "hybrid"] = "global"
 
 
 @dataclass
@@ -67,15 +69,15 @@ def train(
 ):
     sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+    env_dict: dict = asdict(env_options)
+    n_envs = env_dict.pop("n_envs")
+
     def make_env():
         return KRes(
-            n_drones=env_options.n_drones,
-            k=env_options.k,
-            size=env_options.size,
-            alpha=env_options.alpha,
+            **env_dict,
         )
 
-    env = make_vec_env(make_env, n_envs=env_options.n_envs)
+    env = make_vec_env(make_env, n_envs=n_envs)
 
     policy_kwargs = asdict(policy_options)
     policy_kwargs.pop("policy_cls", None)
