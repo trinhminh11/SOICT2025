@@ -6,10 +6,10 @@ from KResRL.environment.env import KRes
 
 def main():
     env_options = EnvOptions(
-        n_envs=1,
-        n_drones=20,
-        k = 3,
-        size=30,
+        n_envs=5,
+        n_drones=5,
+        k = 2,
+        size=4,
         alpha=0.001
     )
 
@@ -40,7 +40,7 @@ def main():
     )
 
     train_options = TrainOptions(
-        total_timesteps=10_000,
+        total_timesteps=100_000,
         log_interval=100
     )
 
@@ -48,10 +48,11 @@ def main():
 
     model.save("trained_model")
 
+
     env = KRes(
-        n_drones=20,
-        k=3,
-        size=30,
+        n_drones=env_options.n_drones,
+        k=env_options.k,
+        size=env_options.size,
         return_state="features",
         normalize_features=True,
         render_mode="human",
