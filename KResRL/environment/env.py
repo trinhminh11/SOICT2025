@@ -48,7 +48,7 @@ class KRes(gym.Env):
         "render_fps": 60,
     }
 
-    def __init__(self, n_drones: int, k: int, size: int, return_adj: bool = True, return_state: Literal["grid", "pos", "features"] = "features", normalize_features: bool = True, alpha = 0.1, render_mode: Literal["human", "rgb_array"] = None, render_fps: int = 60) -> None:
+    def __init__(self, n_drones: int, k: int, size: int, return_adj: bool = True, return_reward: Literal["global", "sparse", "hybrid"] = "global", return_state: Literal["grid", "pos", "features"] = "features", normalize_features: bool = True, alpha = 0.1, render_mode: Literal["human", "rgb_array"] = None, render_fps: int = 60) -> None:
         super().__init__()
         self.n_drones = n_drones
         self.k = k
@@ -56,6 +56,7 @@ class KRes(gym.Env):
         self.max_movement = size  # max movement of 1 drone in grid steps
         
         self.return_adj = return_adj
+        self.return_reward = return_reward
         self.return_state = return_state
         self.normalize_features = normalize_features
         self.alpha = alpha
@@ -92,6 +93,15 @@ class KRes(gym.Env):
             )
         else:
             raise ValueError("Invalid return_state value. Use 'grid' or 'pos'.")
+
+        if self.return_reward == "global":
+            self.reward_space = spaces.Box(low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32)
+        elif self.return_reward == "sparse":
+            self.reward_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.n_drones,), dtype=np.float32)
+        elif self.return_reward == "hybrid":
+            self.reward_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.n_drones + 1,), dtype=np.float32)
+        else:
+            raise ValueError("Invalid return_reward value. Use 'global', 'sparse' or 'hybrid'.")
 
         self.action_space = spaces.MultiDiscrete([9]*self.n_drones)  # 9 actions for each drone (stay, up, UR, right, RD, down, DL, left, LU)
 
@@ -141,9 +151,16 @@ class KRes(gym.Env):
         self.grid_state: np.ndarray[tuple[int, int, int], np.uint16] = None
         self.graph_state: nx.Graph = None
 
+    def reward(self, team_reward: float, drone_reward: np.ndarray):
+        if self.return_reward == "global":
+            return np.array([team_reward], dtype=np.float32)
+        elif self.return_reward == "sparse":
+            return drone_reward.astype(np.float32)
+        elif self.return_reward == "hybrid":
+            return np.concatenate(([team_reward], drone_reward)).astype(np.float32)
+
 
     # handling different kind of state
-
     def __get_graph_state(self, drone_pos: np.ndarray[tuple[int, int], np.uint16]):
         G = nx.Graph()
 
@@ -322,7 +339,9 @@ class KRes(gym.Env):
         return float(mean_row), float(mean_col)
 
     def step(self, action: np.ndarray):
-        reward = 0
+        team_reward = 0
+        drone_reward = np.zeros(self.n_drones, dtype=np.float32)
+
         info = {
             "initial_features": self.initial_features_state,
             "initial_global_features": self.initial_global_features,
@@ -340,8 +359,6 @@ class KRes(gym.Env):
         info["global_features"] = self.global_features
 
         done = current_k >= self.k
-
-        team_reward = 0
 
         # Compute team reward
         # team_reward = current_k - self.k//2 - self.alpha * sum(self.node_features["total_movement"]) + self.n_drones * 10 * done
@@ -365,8 +382,6 @@ class KRes(gym.Env):
         # reward = team_reward + np.mean(drone_reward)
 
 
-
-
         center = self.get_grid_center()
 
         distance_to_last_center = np.zeros(self.n_drones, dtype=np.float32)
@@ -382,17 +397,16 @@ class KRes(gym.Env):
         diff_distance = self.last_distance_to_center - distance_to_last_center
         diff_first_center_distance = self.last_distance_to_first_center - distance_to_first_center
 
+        drone_reward += diff_distance + 5 * diff_first_center_distance + 10*done
 
-        reward += diff_distance.sum() + 2*diff_first_center_distance.sum()
+        team_reward += diff_distance.mean() + 5*diff_first_center_distance.mean() + 10 * current_k/self.k + 100 * done
 
         self.last_distance_to_center = distance_to_center
         self.last_distance_to_first_center = distance_to_first_center
         self.last_center = center
 
 
-        reward += 100*done + 4*current_k/self.k
-
-        return self.state, reward, done, False, info
+        return self.state, self.reward(team_reward, drone_reward), done, done, info
 
     def render(self):
         if self.render_mode is None:
