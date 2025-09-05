@@ -1,6 +1,7 @@
 import random
 from abc import ABC, abstractmethod
-from typing import NamedTuple, Optional
+from typing import Any, Literal, Optional
+from dataclasses import dataclass
 
 import gymnasium.spaces as spaces
 import numpy as np
@@ -9,41 +10,57 @@ from numpy.typing import NDArray
 from torch import Tensor
 # from tensordict import TensorDict
 
-from .. import utils
+from gym_agent import utils
 
 # import psutil
 
 # MAX_MEM_AVAILABLE = psutil.virtual_memory().available
 
 
-class ReplayBufferSamples(NamedTuple):
+@dataclass(frozen=True)
+class BaseBufferSamples:
     observations: Tensor | dict[str, Tensor]
     actions: Tensor | dict[str, Tensor]
-    rewards: Tensor | dict[str, Tensor]
-    next_observations: Tensor
+    rewards: Tensor
+    agent_rewards: Optional[Tensor]
+
+@dataclass(frozen=True)
+class ReplayBufferSamples(BaseBufferSamples):
+    next_observations: Tensor | dict[str, Tensor]
     terminals: Tensor
 
-
-class RolloutBufferSamples(NamedTuple):
-    observations: Tensor | dict[str, Tensor]
-    actions: Tensor | dict[str, Tensor]
-    rewards: Tensor | dict[str, Tensor]
-    values: Tensor
+@dataclass(frozen=True)
+class RolloutBufferSamples(BaseBufferSamples):
     log_prob: Tensor
+    values: Tensor
     advantages: Tensor
     returns: Tensor
 
 
+    agent_log_prob: Optional[Tensor]
+    agent_values: Optional[Tensor]
+    agent_advantages: Optional[Tensor]
+    agent_returns: Optional[Tensor]
+
+
 class BaseBuffer(ABC):
+    observations: NDArray | dict[str, NDArray]
+    actions: NDArray | dict[str, NDArray]
+    rewards: NDArray
+
+    agent_rewards: Optional[NDArray]
+
     def __init__(
         self,
+        /,
         buffer_size: int,
         observation_space: spaces.Space,
         action_space: spaces.Space,
-        reward_space: Optional[spaces.Space] = None,
-        device: torch.device | str = "auto",
-        n_envs: int = 1,
-        seed: Optional[int] = None,
+        device: torch.device | str,
+        n_envs: int,
+        seed: Optional[int],
+        n_agents: Optional[int],
+        marl_agent_prefix_key: Optional[str],
     ):
         if n_envs <= 0:
             raise ValueError("The number of environments must be greater than 0.")
@@ -51,51 +68,65 @@ class BaseBuffer(ABC):
         self.buffer_size = buffer_size
         self.obs_shape = utils.get_shape(observation_space)
         self.action_shape = utils.get_shape(action_space)
-        self.reward_shape = utils.get_shape(reward_space) if reward_space else None
         self.n_envs = n_envs
         self.device = utils.get_device(device)
 
-        self.mem_cntr = 0
-        self.full = False
-
         self.seed = random.seed(seed)
 
-        self.register_base_memory()
+        self.marl = n_agents is not None
+
+        self.n_agents = n_agents
+        if marl_agent_prefix_key is None:
+            marl_agent_prefix_key = "agent_"
+        self.marl_agent_prefix_key = marl_agent_prefix_key
+
+        self.reset()
+
 
     def register_base_memory(self) -> None:
         self.observations = self.mem_register(self.obs_shape)
         self.actions = self.mem_register(self.action_shape)
-        self.rewards = self.mem_register(self.reward_shape)
+        self.rewards = self.mem_register()
 
-        # self.rewards = np.zeros([buffer_size, n_envs], dtype=np.float32)
+        if self.marl:
+            self.agent_rewards = self.mem_register((self.n_agents,))
+        else:
+            self.agent_rewards = None
 
     def get_mem(self, mem_name: str) -> dict | tuple[int, ...]:
         return self.__getattribute__(mem_name)
 
-    def add2mem(self, mem_name: str, idx: int, mem_data: dict | tuple[int, ...], mem_shape: Optional[dict | tuple[int, ...]] = None):
+    def add2mem(
+        self,
+        mem_name: str,
+        idx: int,
+        mem_data: dict | tuple[int, ...],
+        mem_shape: Optional[dict | tuple[int, ...]] = None,
+    ):
         if isinstance(mem_shape, dict):
             for key in mem_data.keys():
                 self.__getattribute__(mem_name)[key][idx] = mem_data[key]
         else:
             self.__getattribute__(mem_name)[idx] = mem_data
 
-
-
-    def mem_register(self, shape: Optional[dict | tuple[int, ...]] = None):
+    def mem_register(self, shape: Optional[dict[str, tuple[int, ...]] | tuple[int, ...]] = None, dtype: np.dtype = np.float32) -> NDArray | dict[str, NDArray]:
         if shape is None:
-            return np.zeros([self.buffer_size, self.n_envs], dtype=np.float32)
+            return np.zeros([self.buffer_size, self.n_envs], dtype=dtype)
         elif isinstance(shape, dict):
-            return  {
-                key: np.zeros([self.buffer_size, self.n_envs, *item_shape], dtype=np.float32)
+            return {
+                key: np.zeros(
+                    [self.buffer_size, self.n_envs, *item_shape], dtype=dtype
+                )
                 for key, item_shape in shape.items()
             }
         else:
-            return np.zeros(
-                [self.buffer_size, self.n_envs, *shape], dtype=np.float32
-            )
+            return np.zeros([self.buffer_size, self.n_envs, *shape], dtype=dtype)
 
     def to(self, device: torch.device | str) -> None:
         self.device = utils.get_device(device)
+    
+    def to_torch(self, x: NDArray | dict[str, NDArray]) -> Tensor | dict[str, Tensor]:      
+        return utils.to_torch(x, device=self.device) if x is not None else None
 
     def __len__(self):
         """
@@ -123,32 +154,40 @@ class BaseBuffer(ABC):
         """
         Reset the buffer.
         """
+
         self.mem_cntr = 0
         self.full = False
 
+        self.register_base_memory()
+
 
 class ReplayBuffer(BaseBuffer):
-    observations: NDArray | dict[str, NDArray]
-    actions: NDArray | dict[str, NDArray]
-    rewards: NDArray | dict[str, NDArray]
     terminals: NDArray
 
     def __init__(
         self,
+        /,
         buffer_size: int,
         observation_space: spaces.Space,
         action_space: spaces.Space,
         device="auto",
         n_envs: int = 1,
-        seed: int = None,
+        seed: Optional[int] = None,
+        n_agents: Optional[int] = None,
+        marl_agent_prefix_key: Optional[str] = None,
     ):
         super().__init__(
-            buffer_size, observation_space, action_space, device, n_envs, seed
+            buffer_size=buffer_size,
+            observation_space=observation_space,
+            action_space=action_space,
+            device=device,
+            n_envs=n_envs,
+            seed=seed,
+            n_agents=n_agents,
+            marl_agent_prefix_key=marl_agent_prefix_key,
         )
 
-        self.terminals = self.mem_register()
-    
-
+        self.terminals = self.mem_register(dtype=np.bool_)
 
     def add(
         self,
@@ -157,6 +196,7 @@ class ReplayBuffer(BaseBuffer):
         reward: NDArray,
         next_observation: NDArray | dict[str, NDArray],
         terminal: NDArray,
+        info: dict[str, Any],
     ) -> None:
         """Add a new experience to memory."""
         idx = self.mem_cntr
@@ -177,11 +217,9 @@ class ReplayBuffer(BaseBuffer):
         else:
             self.actions[idx] = action
 
-        if isinstance(self.reward_shape, dict):
-            for key in reward.keys():
-                self.rewards[key][idx] = reward[key]
-        else:
-            self.rewards[idx] = reward
+        self.rewards[idx] = reward
+        if self.marl:
+            self.agent_rewards[idx] = info[self.marl_agent_prefix_key + "rewards"]
 
         self.terminals[idx] = terminal
 
@@ -191,7 +229,7 @@ class ReplayBuffer(BaseBuffer):
             self.full = True
             self.mem_cntr = 0
 
-    def sample(self, batch_size: int) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    def sample(self, batch_size: int) -> ReplayBufferSamples:
         """Randomly sample a batch of experiences from memory."""
 
         if self.full:
@@ -227,34 +265,53 @@ class ReplayBuffer(BaseBuffer):
         else:
             actions = self.actions[batch, env_ind]
 
-        if isinstance(self.reward_shape, dict):
-            rewards = {key: rew[batch, env_ind] for key, rew in self.rewards.items()}
+        rewards = self.rewards[batch, env_ind]
+
+        if self.marl:
+            agent_rewards = self.agent_rewards[batch, env_ind]
         else:
-            rewards = self.rewards[batch, env_ind]
+            agent_rewards = None
 
         terminals = self.terminals[batch, env_ind]
 
+        # return ReplayBufferSamples.from_numpy(
+        #     observations=observations,
+        #     actions=actions,
+        #     rewards=rewards,
+        #     agent_rewards=agent_rewards,
+        #     next_observations=next_observations,
+        #     terminals=terminals,
+        #     device=self.device,
+        # )
+
         return ReplayBufferSamples(
-            observations=utils.to_torch(observations, device=self.device),
-            actions=utils.to_torch(actions, device=self.device),
-            rewards=utils.to_torch(rewards, device=self.device),
-            next_observations=utils.to_torch(next_observations, device=self.device),
-            terminals=utils.to_torch(terminals, device=self.device),
+            observations=self.to_torch(observations),
+            actions=self.to_torch(actions),
+            rewards=self.to_torch(rewards),
+            agent_rewards=self.to_torch(agent_rewards),
+            next_observations=self.to_torch(next_observations),
+            terminals=self.to_torch(terminals),
         )
 
 
 class RolloutBuffer(BaseBuffer):
-    observations: NDArray | dict[str, NDArray]
-    actions: NDArray | dict[str, NDArray]
-    rewards: NDArray | dict[str, NDArray]
-
-    advantages: NDArray
-    returns: NDArray
+    # group 1
     log_probs: NDArray
     values: NDArray
+    advantages: NDArray
+    returns: NDArray
+
+    # group 2
+    agent_log_probs: Optional[NDArray]
+    agent_values: Optional[NDArray]
+    agent_advantages: Optional[NDArray]
+    agent_returns: Optional[NDArray]
+
+    # at least one of those 2 group must exist
 
     def __init__(
         self,
+        /,
         buffer_size: int,
         observation_space: spaces.Space,
         action_space: spaces.Space,
@@ -262,35 +319,37 @@ class RolloutBuffer(BaseBuffer):
         gae_lambda=0.95,
         device="auto",
         n_envs: int = 1,
-        seed: int = None,
+        seed: Optional[int] = None,
+        n_agents: Optional[int] = None,
+        marl_agent_prefix_key: Optional[str] = None,
+        values_type: Literal["global", "individual", "hybrid"] = "hybrid",
     ):
         super().__init__(
-            buffer_size, observation_space, action_space, device, n_envs, seed
+            buffer_size=buffer_size,
+            observation_space=observation_space,
+            action_space=action_space,
+            device=device,
+            n_envs=n_envs,
+            seed=seed,
+            n_agents=n_agents,
+            marl_agent_prefix_key=marl_agent_prefix_key,
         )
 
-        self.log_probs = self.mem_register()
-        self.values = self.mem_register()
-        
-
-        self.advantages = self.mem_register()
-        self.returns = self.mem_register()
-
-        self.dies = np.zeros((n_envs, ), dtype=np.bool_)
-        self.end_mem_pos = np.zeros((n_envs, ), dtype=np.uint32)
-
+        self.values_type = values_type
         self.gamma = gamma
         self.gae_lambda = gae_lambda
 
-        self.processed = False
+        self.reset()
 
     def add(
         self,
         observation: NDArray | dict[str, NDArray],
         action: NDArray | dict[str, NDArray],
-        reward: NDArray | dict[str, NDArray],
+        reward: NDArray,
         value: NDArray,
         log_prob: NDArray,
         terminal: NDArray[np.bool_],
+        info: dict[str, Any],
     ) -> None:
         if self.processed:
             raise ValueError(
@@ -311,156 +370,196 @@ class RolloutBuffer(BaseBuffer):
         else:
             self.actions[idx, ~self.dies] = action[~self.dies]
 
-        if isinstance(self.reward_shape, dict):
-            for key in reward.keys():
-                self.rewards[key][idx, ~self.dies] = reward[key][~self.dies]
-        else:
-            self.rewards[idx, ~self.dies] = reward[~self.dies]
-
+        self.rewards[idx, ~self.dies] = reward[~self.dies]
         self.values[idx, ~self.dies] = value[~self.dies]
         self.log_probs[idx, ~self.dies] = log_prob[~self.dies]
 
-        self.mem_cntr += 1
+        if self.values_type == "hybrid":
+            self.agent_rewards[idx, ~self.dies] = info[self.marl_agent_prefix_key + "rewards"][~self.dies]
+            self.agent_values[idx, ~self.dies] = info[self.marl_agent_prefix_key + "values"][~self.dies]
+            self.agent_log_probs[idx, ~self.dies] = info[self.marl_agent_prefix_key + "log_probs"][~self.dies]
+
         self.end_mem_pos += ~self.dies
 
         self.dies = self.dies | terminal
 
+        self.mem_cntr += 1
         if self.mem_cntr == self.buffer_size:
             raise ValueError("Rollout buffer is full. Please reset the buffer.")
 
     def reset(self) -> None:
         super().reset()
+        self.processed = False
+        
+        self.agent_log_probs = None
+        self.agent_values = None
+        self.agent_advantages = None
+        self.agent_returns = None
+
+        if self.values_type == "global" or self.values_type == "hybrid":
+            self.log_probs = self.mem_register()
+            self.values = self.mem_register()
+            self.advantages = self.mem_register()
+            self.returns = self.mem_register()
+
+        if self.values_type == "individual":
+            self.log_probs = self.mem_register((self.n_agents,))
+            self.values = self.mem_register((self.n_agents,))
+            self.advantages = self.mem_register((self.n_agents,))
+            self.returns = self.mem_register((self.n_agents,))
+        
+        if self.values_type == "hybrid":
+            self.agent_log_probs = self.mem_register((self.n_agents,))
+            self.agent_values = self.mem_register((self.n_agents,))
+            self.agent_advantages = self.mem_register((self.n_agents,))
+            self.agent_returns = self.mem_register((self.n_agents,))
+
         self.dies = np.zeros((self.n_envs,), dtype=np.bool_)
         self.end_mem_pos = np.zeros((self.n_envs,), dtype=np.uint32)
-        self.processed = False
 
-        if isinstance(self.obs_shape, dict):
-            self.observations = {
-                key: np.zeros([self.buffer_size, self.n_envs, *shape], dtype=np.float32)
-                for key, shape in self.obs_shape.items()
-            }
-        else:
-            self.observations = np.zeros(
-                [self.buffer_size, self.n_envs, *self.obs_shape], dtype=np.float32
+    def normal_calc_advantages_and_returns(
+        self, env_idx: int, last_values: NDArray[np.float32], last_terminals: NDArray[np.bool_]
+    ):
+        T = self.end_mem_pos[env_idx]
+        advantages = np.zeros(T, dtype=np.float32)
+
+        if self.gae_lambda == 1:
+            # No GAE, returns are just discounted rewards
+            returns = np.zeros(T, dtype=np.float32)
+            next_return = 0
+            for t in reversed(range(T)):
+                next_return = self.rewards[t][env_idx] + self.gamma * next_return
+                returns[t] = next_return
+
+            advantages = returns - self.values[:T, env_idx]
+
+            return advantages, returns
+
+        last_gae_lambda = 0
+
+        for t in reversed(range(T)):
+            if t == T - 1:
+                next_non_terminal = 1.0 - last_terminals
+                next_values = last_values
+            else:
+                next_non_terminal = 1.0
+                next_values = self.values[t + 1][env_idx]
+
+            delta = (
+                self.rewards[t][env_idx]
+                + next_non_terminal * self.gamma * next_values
+                - self.values[t][env_idx]
+            )
+            last_gae_lambda = (
+                delta
+                + next_non_terminal * self.gamma * self.gae_lambda * last_gae_lambda
             )
 
-        if isinstance(self.action_shape, dict):
-            self.actions = {
-                key: np.zeros([self.buffer_size, self.n_envs, *shape], dtype=np.float32)
-                for key, shape in self.action_shape.items()
-            }
-        else:
-            self.actions = np.zeros(
-                [self.buffer_size, self.n_envs, *self.action_shape], dtype=np.float32
-            )
-        
-        if isinstance(self.reward_shape, dict):
-            self.rewards = {
-                key: np.zeros([self.buffer_size, self.n_envs, *shape], dtype=np.float32)
-                for key, shape in self.reward_shape.items()
-            }
-        else:
-            self.rewards = np.zeros([self.buffer_size, self.n_envs, *self.reward_shape], dtype=np.float32)
+            advantages[t] = last_gae_lambda
 
-        self.values = np.zeros([self.buffer_size, self.n_envs], dtype=np.float32)
-        self.log_probs = np.zeros([self.buffer_size, self.n_envs], dtype=np.float32)
-        self.advantages = np.zeros([self.buffer_size, self.n_envs], dtype=np.float32)
-        self.returns = np.zeros([self.buffer_size, self.n_envs], dtype=np.float32)
+        returns = advantages + self.values[:T, env_idx]
+
+        return advantages, returns
+
+    
+    def agent_calc_advantages_and_returns(
+        self, env_idx: int, agent_idx: int, last_values: NDArray[np.float32], last_terminals: NDArray[np.bool_]
+    ):
+        T = self.end_mem_pos[env_idx]
+        advantages = np.zeros(T, dtype=np.float32)
+
+        if self.gae_lambda == 1:
+            # No GAE, returns are just discounted rewards
+            returns = np.zeros(T, dtype=np.float32)
+            next_return = 0
+            for t in reversed(range(T)):
+                next_return = self.agent_rewards[t, env_idx, agent_idx] + self.gamma * next_return
+                returns[t] = next_return
+
+            advantages = returns - self.agent_values[:T, env_idx, agent_idx]
+
+            return advantages, returns
+
+        last_gae_lambda = 0
+
+        for t in reversed(range(T)):
+            if t == T - 1:
+                next_non_terminal = 1.0 - last_terminals
+                next_values = last_values
+            else:
+                next_non_terminal = 1.0
+                next_values = self.agent_values[t + 1, env_idx, agent_idx]
+
+            delta = (
+                self.agent_rewards[t, env_idx, agent_idx]
+                + next_non_terminal * self.gamma * next_values
+                - self.agent_values[t, env_idx, agent_idx]
+            )
+            last_gae_lambda = (
+                delta
+                + next_non_terminal * self.gamma * self.gae_lambda * last_gae_lambda
+            )
+
+            advantages[t] = last_gae_lambda
+
+        returns = advantages + self.agent_values[:T, env_idx, agent_idx]
+
+        return advantages, returns
 
     def calc_advantages_and_returns(
-        self, last_values: NDArray[np.float32], last_terminals: NDArray[np.bool_]
+        self, last_values: NDArray[np.float32], last_terminals: NDArray[np.bool_], info: dict[str, Any]
     ) -> None:
         if self.processed:
             raise ValueError(
                 "Cannot calculate advantages and returns after processing the buffer."
             )
 
-        def _calc_advantages_and_returns(env):
-            if self.gae_lambda == 1:
-                # No GAE, returns are just discounted rewards
-                T = self.end_mem_pos[env]
-                advantages = np.zeros(T, dtype=np.float32)
-                returns = np.zeros(T, dtype=np.float32)
-                next_return = 0
-                for t in reversed(range(T)):
-                    next_return = self.rewards[t][env] + self.gamma * next_return
-                    returns[t] = next_return
+        for env_idx in range(self.n_envs):
+            if self.values_type == "global" or self.values_type == "hybrid":
+                advantages, returns = self.normal_calc_advantages_and_returns(env_idx, last_values[env_idx], last_terminals[env_idx])
+                self.advantages[: self.end_mem_pos[env_idx], env_idx] = advantages
+                self.returns[: self.end_mem_pos[env_idx], env_idx] = returns
 
-                advantages = returns - self.values[:T, env]
+            if self.values_type == "individual":
+                for agent_idx in range(self.n_agents):
+                    advantages, returns = self.agent_calc_advantages_and_returns(env_idx, agent_idx, last_values[env_idx][agent_idx], last_terminals[env_idx][agent_idx])
+                    self.advantages[: self.end_mem_pos[env_idx], env_idx, agent_idx] = advantages
+                    self.returns[: self.end_mem_pos[env_idx], env_idx, agent_idx] = returns
 
-                return advantages, returns
+            if self.values_type == "hybrid":
+                for agent_idx in range(self.n_agents):
+                    advantages, returns = self.agent_calc_advantages_and_returns(env_idx, agent_idx, info[self.marl_agent_prefix_key + "values"][env_idx][agent_idx], last_terminals[env_idx][agent_idx])
+                    self.agent_advantages[: self.end_mem_pos[env_idx], env_idx, agent_idx] = advantages
+                    self.agent_returns[: self.end_mem_pos[env_idx], env_idx, agent_idx] = returns
 
-            T = self.end_mem_pos[env]
-            advantages = np.zeros(T, dtype=np.float32)
-            last_gae_lambda = 0
-
-            for t in reversed(range(T)):
-                if t == T - 1:
-                    next_non_terminal = 1.0 - last_terminals[env]
-                    next_values = last_values[env]
-                else:
-                    next_non_terminal = 1.0
-                    next_values = self.values[t + 1][env]
-
-                delta = (
-                    self.rewards[t][env]
-                    + next_non_terminal * self.gamma * next_values
-                    - self.values[t][env]
-                )
-                last_gae_lambda = (
-                    delta
-                    + next_non_terminal * self.gamma * self.gae_lambda * last_gae_lambda
-                )
-
-                advantages[t] = last_gae_lambda
-
-            returns = advantages + self.values[:T, env]
-
-            return advantages, returns
-
-        for env in range(self.n_envs):
-            advantages, returns = _calc_advantages_and_returns(env)
-            self.advantages[: self.end_mem_pos[env], env] = advantages
-            self.returns[: self.end_mem_pos[env], env] = returns
 
     def process_mem(self) -> NDArray:
         if self.processed:
             raise ValueError("Cannot process the buffer again.")
 
-        def swap_and_flatten(arr: NDArray) -> NDArray:
+        def array_swap_and_flatten(arr: NDArray) -> NDArray:
+            ret_arr = np.zeros((sum(self.end_mem_pos), *arr.shape[2:]), dtype=arr.dtype)
+
+            ret_arr[: self.end_mem_pos[0]] = arr[: self.end_mem_pos[0], 0]
+
+            for env in range(1, self.n_envs):
+                ret_arr[self.end_mem_pos[env - 1] : self.end_mem_pos[env]] = arr[
+                    : self.end_mem_pos[env], env
+                ]
+            return ret_arr
+
+        def swap_and_flatten(
+            arr: NDArray | dict[str, NDArray],
+        ) -> NDArray | dict[str, NDArray]:
             """
             Swap and then flatten axes 0 (buffer_size) and 1 (n_envs)
             to convert shape from [n_steps, n_envs, ...] (when ... is the shape of the features)
             to [n_envs * n_steps, ...] (which maintain the order)
             """
-            if isinstance(arr, dict):
-                ret_arr = {}
-                for key in arr:
-                    ret_arr[key] = np.zeros(
-                        (sum(self.end_mem_pos), *arr[key].shape[2:]),
-                        dtype=arr[key].dtype,
-                    )
-
-                    ret_arr[key][: self.end_mem_pos[0]] = arr[key][
-                        : self.end_mem_pos[0], 0
-                    ]
-                    for i in range(1, self.n_envs):
-                        ret_arr[self.end_mem_pos[i - 1] : self.end_mem_pos[i]] = arr[
-                            key
-                        ][: self.end_mem_pos[i], i]
-
-            else:
-                ret_arr = np.zeros(
-                    (sum(self.end_mem_pos), *arr.shape[2:]), dtype=arr.dtype
-                )
-
-                ret_arr[: self.end_mem_pos[0]] = arr[: self.end_mem_pos[0], 0]
-                for i in range(1, self.n_envs):
-                    ret_arr[self.end_mem_pos[i - 1] : self.end_mem_pos[i]] = arr[
-                        : self.end_mem_pos[i], i
-                    ]
-
-            return ret_arr
+            return (
+                {key: array_swap_and_flatten(arr[key]) for key in arr} if isinstance(arr, dict)
+                else array_swap_and_flatten(arr)
+            )
 
         self.observations = swap_and_flatten(self.observations)
         self.actions = swap_and_flatten(self.actions)
@@ -469,6 +568,15 @@ class RolloutBuffer(BaseBuffer):
         self.log_probs = swap_and_flatten(self.log_probs)
         self.advantages = swap_and_flatten(self.advantages)
         self.returns = swap_and_flatten(self.returns)
+
+
+        # handling marl 
+        self.agent_returns = swap_and_flatten(self.agent_rewards) if self.marl else None
+        if self.values_type == "hybrid":
+            self.agent_log_probs = swap_and_flatten(self.agent_log_probs)
+            self.agent_values = swap_and_flatten(self.agent_values)
+            self.agent_advantages = swap_and_flatten(self.agent_advantages)
+            self.agent_returns = swap_and_flatten(self.agent_returns)
 
         self.processed = True
 
@@ -512,12 +620,35 @@ class RolloutBuffer(BaseBuffer):
         else:
             actions = self.actions[batch]
 
+        if self.marl:
+            agent_rewards = self.agent_rewards[batch]
+        else:
+            agent_rewards = None
+
+        if self.values_type == "hybrid":
+            agent_values = self.agent_values[batch]
+            agent_log_probs = self.agent_log_probs[batch]
+            agent_advantages = self.agent_advantages[batch]
+            agent_returns = self.agent_returns[batch]
+        else:
+            agent_values = None
+            agent_log_probs = None
+            agent_advantages = None
+            agent_returns = None
+
         return RolloutBufferSamples(
-            observations=utils.to_torch(observations, device=self.device),
-            actions=utils.to_torch(actions, device=self.device),
-            rewards=utils.to_torch(self.rewards[batch], device=self.device),
-            values=utils.to_torch(self.values[batch], device=self.device),
-            log_prob=utils.to_torch(self.log_probs[batch], device=self.device),
-            advantages=utils.to_torch(self.advantages[batch], device=self.device),
-            returns=utils.to_torch(self.returns[batch], device=self.device),
+            observations=self.to_torch(observations),
+            actions=self.to_torch(actions),
+            rewards=self.to_torch(self.rewards[batch]),
+            agent_rewards=self.to_torch(agent_rewards),
+
+            values=self.to_torch(self.values[batch]),
+            log_prob=self.to_torch(self.log_probs[batch]),
+            advantages=self.to_torch(self.advantages[batch]),
+            returns=self.to_torch(self.returns[batch]),
+
+            agent_values=self.to_torch(agent_values),
+            agent_log_prob=self.to_torch(agent_log_probs),
+            agent_advantages=self.to_torch(agent_advantages),
+            agent_returns=self.to_torch(agent_returns),
         )

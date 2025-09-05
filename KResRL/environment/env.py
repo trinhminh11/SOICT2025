@@ -28,9 +28,9 @@ class KRes(gym.Env):
         "col",                  # normalize (0, 1)  col/n_rows
         # "center_row",           # normalize (0, 1)  center_row/n_cols
         # "center_col",           # normalize (0, 1)  center_col/n_rows
-        # "step_size",            #           (0, 1)  1 / size
+        "step_size",            #           (0, 1)  1 / size
         # "total_movement",       # normalize (0, 1)  total_movement/ size
-        # "degree",               # normalize (0, 1)  degree/ K
+        "degree",               # normalize (0, 1)  degree/ K
         "node_connectivity",    # normalize (0, 1)  node_connectivity/K
     ]
 
@@ -53,8 +53,6 @@ class KRes(gym.Env):
         self.n_drones = n_drones
         self.k = k
         self.size = size
-        self.max_movement = size  # max movement of 1 drone in grid steps
-        
         self.return_adj = return_adj
         self.return_reward = return_reward
         self.return_state = return_state
@@ -113,7 +111,7 @@ class KRes(gym.Env):
             "center_row": np.zeros((self.n_drones,), dtype=np.float32),
             "center_col": np.zeros((self.n_drones,), dtype=np.float32),
             "step_size": np.full((self.n_drones,), 1/(self.size-1), dtype=np.float32),
-            "total_movement": np.zeros((self.n_drones,), dtype=np.uint16),
+            "total_movement": np.zeros((self.n_drones,), dtype=np.float32),
             "node_connectivity": np.zeros((self.n_drones,), dtype=np.uint16),
             "degree": np.zeros((self.n_drones,), dtype=np.uint16)
         }
@@ -126,7 +124,7 @@ class KRes(gym.Env):
             "center_row": self.size - 1 if self.normalize_features else 1,
             "center_col": self.size - 1 if self.normalize_features else 1,
             "step_size": 1,
-            "total_movement": self.max_movement if self.normalize_features else 1,
+            "total_movement": self.size*np.sqrt(2) if self.normalize_features else 1,
             "node_connectivity": self.k if self.normalize_features else 1,
             "degree": self.k if self.normalize_features else 1
         }
@@ -150,6 +148,9 @@ class KRes(gym.Env):
         self._drone_pos: np.ndarray[tuple[int, int], np.uint16] = None
         self.grid_state: np.ndarray[tuple[int, int, int], np.uint16] = None
         self.graph_state: nx.Graph = None
+
+        self._hungarian_drone_pos: np.ndarray[tuple[int, int], np.uint16] = None
+        self._hungarian_movement: np.ndarray[tuple[int, int], np.float32] = None
 
     def reward(self, team_reward: float, drone_reward: np.ndarray):
         if self.return_reward == "global":
@@ -211,17 +212,20 @@ class KRes(gym.Env):
     
     @drone_pos.setter
     def drone_pos(self, value: np.ndarray[tuple[int, int], np.uint16]) -> None:
-        cost_matrix = np.zeros((self.n_drones, self.n_drones), dtype=np.uint16)
+        cost_matrix = np.zeros((self.n_drones, self.n_drones), dtype=np.float32)
         for i in range(self.n_drones):
             for j in range(self.n_drones):
                 diff = np.linalg.norm(self.initial_drone_pos[i].astype(np.float32) - value[j].astype(np.float32))
-                cost_matrix[i, j] = np.ceil(diff/np.sqrt(2))
+                cost_matrix[i, j] = diff
 
         indexes = Munkres().compute(cost_matrix.copy())
         # Reassign drone_pos so that each drone moves to the position assigned by the optimal matching
-        after_matching_drone_pos = np.zeros_like(value)
+        self._hungarian_drone_pos = np.zeros_like(value)
+        self._hungarian_movement = np.zeros((self.n_drones,), dtype=np.float32)
+        
         for i, j in indexes:
-            after_matching_drone_pos[i] = value[j]
+            self._hungarian_drone_pos[i] = value[j]
+            self._hungarian_movement[i] = cost_matrix[i, j]
 
         # self._drone_pos = after_matching_drone_pos
         self._drone_pos = value
@@ -233,7 +237,7 @@ class KRes(gym.Env):
         for i in range(self.n_drones):
             self.node_features["row"][i] = self._drone_pos[i][0]
             self.node_features["col"][i] = self._drone_pos[i][1]
-            self.node_features["total_movement"][i] = cost_matrix[i][indexes[i][1]]
+            self.node_features["total_movement"][i] = cost_matrix[i][i]
             self.node_features["node_connectivity"][i] = self.get_drone_connectivity_value(i)
             self.node_features["degree"][i] = self.graph_state.degree[i]
 
@@ -261,6 +265,12 @@ class KRes(gym.Env):
 
         self.initial_global_features = self.global_features.copy()
         self.initial_global_features["graph_connectivity"] = min(_node_features["node_connectivity"])
+
+        center = self.get_grid_center(self.initial_grid_state)
+        _node_features["first_center_row"] = np.full((self.n_drones,), center[0], dtype=np.float32)
+        _node_features["first_center_col"] = np.full((self.n_drones,), center[1], dtype=np.float32)
+        _node_features["center_row"] = np.full((self.n_drones,), center[0], dtype=np.float32)
+        _node_features["center_col"] = np.full((self.n_drones,), center[1], dtype=np.float32)
 
         self.initial_features_state = self.__get_features_state(self.initial_graph_state, _node_features)
 
@@ -301,14 +311,24 @@ class KRes(gym.Env):
         return self.__get_pretty_grid_state(self.drone_pos)    
 
 
-    def reset(self, seed=None, options=None):
+    def reset(self, seed=None, options:dict=None):
+        if options is None:
+            options = {}
+    
         _drone_pos = np.zeros((self.n_drones, 2), dtype=np.uint16)  # Initialize drone positions
         # Randomly place drones in the grid
-        positions = np.random.choice(self.size * self.size, self.n_drones)
 
-        for drone, pos in enumerate(positions):
-            i, j = divmod(pos, self.size)
-            _drone_pos[drone] = (i, j)
+
+        _option_pos = options.get("drone_pos", None)
+        if _option_pos:
+            for idx, (i, j) in enumerate(_option_pos):
+                _drone_pos[idx] = (i, j)
+        else:
+            positions = np.random.choice(self.size * self.size, self.n_drones)
+            for idx, pos in enumerate(positions):
+                i, j = divmod(pos, self.size)
+                _drone_pos[idx] = (i, j)
+
 
         self.__set_initial(_drone_pos)
 
@@ -317,7 +337,7 @@ class KRes(gym.Env):
         self.last_center = self.get_grid_center()
         self.first_center = self.last_center
 
-        # TODO: delete
+
         self.last_distance_to_center = np.zeros(self.n_drones, dtype=np.float32)
         self.last_distance_to_first_center = np.zeros(self.n_drones, dtype=np.float32)
         for i in range(self.n_drones):
@@ -326,13 +346,15 @@ class KRes(gym.Env):
 
         self.node_features["first_center_row"] = np.full((self.n_drones,), self.first_center[0], dtype=np.float32)
         self.node_features["first_center_col"] = np.full((self.n_drones,), self.first_center[1], dtype=np.float32)
-        self.node_features["center_row"] = np.full((self.n_drones,), self.last_center[0], dtype=np.float32)
-        self.node_features["center_col"] = np.full((self.n_drones,), self.last_center[1], dtype=np.float32)
 
         return self.state, {}
     
-    def get_grid_center(self):
-        grid_state = self.grid_state.sum(axis=2)
+    def get_grid_center(self, grid_state: np.ndarray = None):
+        if grid_state is None:
+            grid_state = self.grid_state.sum(axis=2)
+        else:
+            grid_state = grid_state.sum(axis=2)
+            
         rows, cols = np.where(grid_state > 0)
         mean_row = rows.mean()
         mean_col = cols.mean()
@@ -343,6 +365,7 @@ class KRes(gym.Env):
         drone_reward = np.zeros(self.n_drones, dtype=np.float32)
 
         info = {
+            "initial_pos": self.initial_drone_pos,
             "initial_features": self.initial_features_state,
             "initial_global_features": self.initial_global_features,
             "K": self.k,
@@ -354,9 +377,7 @@ class KRes(gym.Env):
         self.drone_pos = np.clip(self.drone_pos + moves, [0,0], [self.size-1, self.size-1])
 
         current_k = int(min(self.node_features["node_connectivity"]))
-        info["current_k"] = current_k
-        info["sparse_reward"] = np.zeros(self.n_drones, dtype=np.float32)
-        info["global_features"] = self.global_features
+
 
         done = current_k >= self.k
 
@@ -399,12 +420,18 @@ class KRes(gym.Env):
 
         drone_reward += diff_distance + 5 * diff_first_center_distance + 10*done
 
+
         team_reward += diff_distance.mean() + 5*diff_first_center_distance.mean() + 10 * current_k/self.k + 100 * done
 
         self.last_distance_to_center = distance_to_center
         self.last_distance_to_first_center = distance_to_first_center
         self.last_center = center
 
+        info["current_k"] = current_k
+        info['agent_rewards'] = drone_reward
+        info["global_features"] = self.global_features
+        info["total_movement"] = self.node_features["total_movement"]
+        info["hungarian_movement"] = self._hungarian_movement
 
         return self.state, self.reward(team_reward, drone_reward), done, done, info
 
