@@ -135,7 +135,17 @@ class AgentBase(ABC):
 
         self.save_kwargs.append(name)
 
-    def save_info(self):
+    def save_info(self, save_key: list[str] = None):
+        """
+        Get the information to be saved.
+
+        Args:
+            save_key (list[str], optional): The keys to save. Defaults to None.
+
+        """
+        if save_key is None:
+            save_key = ["policy", "episode", "total_timesteps", "scores", "mean_scores", "optimizers"] + self.save_kwargs
+
         ret = {
             "episode": self.episode,
             "total_timesteps": self.total_timesteps,
@@ -154,7 +164,14 @@ class AgentBase(ABC):
 
         return ret
 
-    def save(self, dir, *post_names):
+    def save(self, dir, *post_names, save_key: list[str] = None):
+        """Save the agent's information to a file.
+
+        Args:
+            dir (str): The directory to save the file.
+            *post_names: Additional strings to append to the filename.
+            save_key (list[str], optional): The keys to save. If not provided, defaults to ["policy", "episode", "total_timesteps", "scores", "mean_scores", "optimizers"] + self.save_kwargs
+        """
         name = self.name
 
         if not os.path.exists(dir):
@@ -163,19 +180,29 @@ class AgentBase(ABC):
         for post_name in post_names:
             name += "_" + str(post_name)
 
-        torch.save(self.save_info(), os.path.join(dir, name + ".pth"))
+        torch.save(self.save_info(save_key), os.path.join(dir, name + ".pth"))
 
-    def load(self, dir, *post_names):
+    def load(self, dir, *post_names, load_key=None):
+        """Load the agent's information from a file.
+
+        Args:
+            dir (str): The directory to load the file from.
+            *post_names: Additional strings to append to the filename.
+            load_key (list[str], optional): The keys to load. If not provided, defaults to ["policy", "episode", "total_timesteps", "scores", "mean_scores", "optimizers"] + self.save_kwargs.
+        """
         name = self.name
         for post_name in post_names:
             name += "_" + str(post_name)
+
+        if load_key is None:
+            load_key = ["policy", "episode", "total_timesteps", "scores", "mean_scores", "optimizers"] + self.save_kwargs
 
         checkpoint = torch.load(
             os.path.join(dir, name + ".pth"), self.device, weights_only=False
         )
 
-        self.policy.load_state_dict(checkpoint["policy"])
 
+        self.policy.load_state_dict(checkpoint["policy"])
         self.episode = checkpoint["episode"]
         self.total_timesteps = checkpoint["total_timesteps"]
         self.scores = checkpoint["scores"]
@@ -253,11 +280,14 @@ class AgentBase(ABC):
         start_episode = self.episode
         start_timesteps = self.total_timesteps
 
+        scores = []
+
         while True:
             score, timesteps = self.train_on_episode(deterministic, callbacks)
 
+            scores.append(score)
             self.scores.append(score)
-            avg_score = np.mean(self.scores[-100:])
+            avg_score = np.mean(scores[-100:])
             self.mean_scores.append(avg_score)
 
             if save_best:
@@ -280,7 +310,7 @@ class AgentBase(ABC):
                             "episode": self.episode,
                             "time_step": self.total_timesteps,
                             "avg_score": avg_score,
-                            "score": self.scores[-1],
+                            "score": scores[-1],
                         }
                     )
 
@@ -294,7 +324,7 @@ class AgentBase(ABC):
                             "episode": self.episode,
                             "time_step": self.total_timesteps,
                             "avg_score": avg_score,
-                            "score": self.scores[-1],
+                            "score": scores[-1],
                         }
                     )
 
